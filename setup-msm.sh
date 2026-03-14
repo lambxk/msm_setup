@@ -11,6 +11,7 @@ NC='\033[0m'  # No Color
 
 # 默认值
 DEFAULT_BACKUP_DNS="223.5.5.5"
+DEFAULT_BACKUP_DNSV6="2400:3200::1"
 DEFAULT_IPV4_GATEWAY="10.10.0.2"
 DEFAULT_IPV6_GATEWAY="fd00::42:aff:fe0a:2"
 DEFAULT_INTERFACE="lan"
@@ -276,6 +277,14 @@ get_backup_dns() {
         BACKUP_DNS="$DEFAULT_BACKUP_DNS"
     fi
     print_info "使用备用 DNS: $BACKUP_DNS"
+
+    echo ""
+    echo "请输入备用 DNSV6 地址（默认: $DEFAULT_BACKUP_DNSV6）:"
+    read -r BACKUP_DNSV6
+    if [ -z "$BACKUP_DNSV6" ]; then
+        BACKUP_DNSV6="$DEFAULT_BACKUP_DNSV6"
+    fi
+    print_info "使用备用 DNSV6: $BACKUP_DNSV6"
 }
 
 get_pushplus_token() {
@@ -351,6 +360,7 @@ setup_dns() {
             print_info "正在切换到 MSM DNS: $MSM_IP"
             uci del dhcp.@dnsmasq[0].server 2>/dev/null || true
             uci add_list dhcp.@dnsmasq[0].server="$MSM_IP"
+            uci add_list dhcp.lan.dns="$IPV6_GATEWAY"
             uci set network.lan.dns="$MSM_IP"
             uci del dhcp.lan.dhcp_option 2>/dev/null || true
             uci add_list dhcp.lan.dhcp_option="6,$MSM_IP"
