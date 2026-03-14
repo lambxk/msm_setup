@@ -64,6 +64,15 @@ read -r -d '' IPV6_TELEGRAM_ROUTES << 'EOF' || true
 2001:67c:4e8::/48
 EOF
 
+is_msm_dns_healthy() {
+    ping -c1 -W1 "$IPV4_GATEWAY" >/dev/null 2>&1 || return 1
+    for d in baidu.com qq.com cloudflare.com; do
+        if nslookup -timeout=3 -retry=1 "$d" "$IPV4_GATEWAY" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
 # 根据选择合并路由
 merge_ipv4_routes() {
     local temp_routes=""
@@ -350,38 +359,38 @@ setup_dns() {
     echo ""
     echo "正在检查 MSM 连接状态..."
 
-    curl -s -o /dev/null --connect-timeout 3 "$CHECK_HOST"
-
-    # 检查 MSM 是否可达
-    if [ $? -eq 0 ]; then
+    if is_msm_dns_healthy; then
         print_info "网络连接正常，使用 MSM DNS"
-        CURRENT_DNS=$(uci get dhcp.@dnsmasq[0].server 2>/dev/null | grep "$MSM_IP")
+        CURRENT_DNS=$(uci get dhcp.lan.dhcp_option 2>/dev/null | grep "$IPV4_GATEWAY")
         if [ -z "$CURRENT_DNS" ]; then
-            print_info "正在切换到 MSM DNS: $MSM_IP"
-            uci del dhcp.@dnsmasq[0].server 2>/dev/null || true
-            uci add_list dhcp.@dnsmasq[0].server="$MSM_IP"
+            print_info "正在切换到 MSM DNS: $IPV4_GATEWAY，$IPV6_GATEWAY"
+            uci del dhcp.lan.dns 2>/dev/null || true
             uci add_list dhcp.lan.dns="$IPV6_GATEWAY"
-            uci set network.lan.dns="$MSM_IP"
+
             uci del dhcp.lan.dhcp_option 2>/dev/null || true
-            uci add_list dhcp.lan.dhcp_option="6,$MSM_IP"
+            uci add_list dhcp.lan.dhcp_option="6,$IPV4_GATEWAY"
+
             uci commit
             /etc/init.d/network reload
             /etc/init.d/dnsmasq restart
             print_info "DNS 配置完成"
-            logger -t "MSM-CONFIG" "MSM 恢复，已切换到 MSM DNS $MSM_IP"
+            logger -t "MSM-CONFIG" "MSM 恢复，已切换到 MSM DNS $IPV4_GATEWAY，$IPV6_GATEWAY"
         else
             print_info "MSM DNS 已配置，无需更改"
         fi
     else
         print_warning "网络连接异常，使用备用 DNS"
-        CURRENT_DNS=$(uci get dhcp.@dnsmasq[0].server 2>/dev/null | grep "$BACKUP_DNS")
+        CURRENT_DNS=$(uci get dhcp.lan.dhcp_option 2>/dev/null | grep "$BACKUP_DNS")
         if [ -z "$CURRENT_DNS" ]; then
-            print_info "正在切换到备用 DNS: $BACKUP_DNS"
-            uci del dhcp.@dnsmasq[0].server 2>/dev/null || true
-            uci add_list dhcp.@dnsmasq[0].server="$BACKUP_DNS"
-            uci set network.lan.dns="$BACKUP_DNS"
+            print_info "正在切换到备用 DNS: $BACKUP_DNS，$BACKUP_DNSV6"
+
+            uci del dhcp.lan.dns 2>/dev/null || true
+            uci add_list dhcp.lan.dns="$BACKUP_DNSV6"
+
+   
             uci del dhcp.lan.dhcp_option 2>/dev/null || true
             uci add_list dhcp.lan.dhcp_option="6,$BACKUP_DNS"
+
             uci commit
             /etc/init.d/network reload
             /etc/init.d/dnsmasq restart
@@ -500,7 +509,12 @@ setup_health_check_schedule() {
 # 检查 msm 容器是否正常运行，如果容器停止则切换到备用 DNS，切换后等待 5 分钟再检查
 
 MSM_IP="PLACEHOLDER_MSM_IP"
+MSM_IPV6="PLACEHOLDER_MSM_IPV6"
 BACKUP_DNS="PLACEHOLDER_BACKUP_DNS"
+BACKUP_DNSV6="PLACEHOLDER_BACKUP_DNSV6"
+PUSHPLUS_TOKEN="PLACEHOLDER_PUSHPLUS_TOKEN"
+
+
 
 # 状态文件，用于记录最后一次切换到备用 DNS 的时间戳
 STATE_FILE="/tmp/msm_dns_switch_time"
@@ -518,7 +532,7 @@ is_msm_dns_healthy() {
 
 # PushPlus 推送函数（异步，不阻塞）
 push_to_pushplus() {
-    local token="PLACEHOLDER_PUSHPLUS_TOKEN"
+    local token="$PUSHPLUS_TOKEN"
     local title="$1"
     local content="$2"
     local url="http://www.pushplus.plus/send"
@@ -534,20 +548,19 @@ if [ -f "$STATE_FILE" ]; then
     current_time=$(date +%s)
     elapsed=$((current_time - last_switch))
 
-    # 如果距离上次切换不足 5 分钟，则直接退出，跳过本次检测
+    # 如果距离上次切换不足 15 分钟，则直接退出，跳过本次检测
     if [ $elapsed -lt $WAIT_TIME ]; then
         logger -t "MSM-HEALTH-CHECK" "距离上次切换到备用 DNS 不足 5 分钟（已过 ${elapsed}秒），本次跳过检测"
         exit 0
     fi
 fi
 if is_msm_dns_healthy; then
-    CURRENT_DNS="$(uci get dhcp.@dnsmasq[0].server 2>/dev/null || true)"
-    echo "$CURRENT_DNS" | grep -q "$MSM_IP"
+    CURRENT_DNS="$(uci get dhcp.lan.dhcp_option 2>/dev/null || true)"
+    echo "$CURRENT_DNS" | grep -q "6,$MSM_IP"
     if [ $? -ne 0 ]; then
         push_to_pushplus "MSM 恢复" "检测到 MSM DNS 正常，DNS 已切换回 $MSM_IP"
-        uci del dhcp.@dnsmasq[0].server 2>/dev/null || true
-        uci add_list dhcp.@dnsmasq[0].server="$MSM_IP"
-        uci set network.lan.dns="$MSM_IP"
+        uci del dhcp.lan.dns.server 2>/dev/null || true
+        uci add_list dhcp.lan.dns.server="$MSM_IPV6"
         uci del dhcp.lan.dhcp_option 2>/dev/null || true
         uci add_list dhcp.lan.dhcp_option="6,$MSM_IP"
         uci commit
@@ -556,13 +569,12 @@ if is_msm_dns_healthy; then
         rm -f "$STATE_FILE"
     fi
 else
-    CURRENT_DNS="$(uci get dhcp.@dnsmasq[0].server 2>/dev/null || true)"
+    CURRENT_DNS="$(uci get dhcp.lan.dhcp_option 2>/dev/null || true)"
     echo "$CURRENT_DNS" | grep -q "$BACKUP_DNS"
     if [ $? -ne 0 ]; then
         push_to_pushplus "MSM 故障" "检测到 MSM DNS 异常，DNS 已切换至备用 $BACKUP_DNS"
-        uci del dhcp.@dnsmasq[0].server 2>/dev/null || true
-        uci add_list dhcp.@dnsmasq[0].server="$BACKUP_DNS"
-        uci set network.lan.dns="$BACKUP_DNS"
+        uci del dhcp.lan.dns.server 2>/dev/null || true
+        uci add_list dhcp.lan.dns.server="$BACKUP_DNSV6"
         uci del dhcp.lan.dhcp_option 2>/dev/null || true
         uci add_list dhcp.lan.dhcp_option="6,$BACKUP_DNS"
         uci commit
@@ -575,7 +587,9 @@ fi
 HEALTH_EOF
 
     # 替换占位符
+    sed -i "s|PLACEHOLDER_MSM_IPV6|$IPV6_GATEWAY|g" "$HEALTH_CHECK_SCRIPT"
     sed -i "s|PLACEHOLDER_MSM_IP|$IPV4_GATEWAY|g" "$HEALTH_CHECK_SCRIPT"
+    sed -i "s|PLACEHOLDER_BACKUP_DNSV6|$BACKUP_DNSV6|g" "$HEALTH_CHECK_SCRIPT"
     sed -i "s|PLACEHOLDER_BACKUP_DNS|$BACKUP_DNS|g" "$HEALTH_CHECK_SCRIPT"
     sed -i "s|PLACEHOLDER_PUSHPLUS_TOKEN|$PUSHPLUS_TOKEN|g" "$HEALTH_CHECK_SCRIPT"
 
@@ -589,7 +603,7 @@ HEALTH_EOF
     crontab -l 2>/dev/null | grep -v "msm-health-check.sh" | crontab - 2>/dev/null || true
 
     # 添加新的 crontab 条目 - 每分钟执行一次
-    (crontab -l 2>/dev/null; echo "* * * * * $HEALTH_CHECK_SCRIPT") | crontab - 2>/dev/null
+    (crontab -l 2>/dev/null; echo "*/5 * * * * $HEALTH_CHECK_SCRIPT") | crontab - 2>/dev/null
 
     echo ""
     print_info "✅ DNS 健康检查已启用！"
@@ -714,6 +728,9 @@ main() {
         print_info "MSM IPv6 地址: $IPV6_GATEWAY"
     fi
     print_info "备用 DNS 地址: $BACKUP_DNS"
+    if [ -n "$BACKUP_DNSV6" ]; then
+        print_info "备用 DNS IPv6 地址: $BACKUP_DNSV6"
+    fi
     echo ""
     read -p "按 Enter 进入菜单..."
 
