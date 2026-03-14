@@ -559,8 +559,8 @@ if is_msm_dns_healthy; then
     echo "$CURRENT_DNS" | grep -q "6,$MSM_IP"
     if [ $? -ne 0 ]; then
         push_to_pushplus "MSM 恢复" "检测到 MSM DNS 正常，DNS 已切换回 $MSM_IP"
-        uci del dhcp.lan.dns.server 2>/dev/null || true
-        uci add_list dhcp.lan.dns.server="$MSM_IPV6"
+        uci del dhcp.lan.dns 2>/dev/null || true
+        uci add_list dhcp.lan.dns="$MSM_IPV6"
         uci del dhcp.lan.dhcp_option 2>/dev/null || true
         uci add_list dhcp.lan.dhcp_option="6,$MSM_IP"
         uci commit
@@ -573,8 +573,8 @@ else
     echo "$CURRENT_DNS" | grep -q "$BACKUP_DNS"
     if [ $? -ne 0 ]; then
         push_to_pushplus "MSM 故障" "检测到 MSM DNS 异常，DNS 已切换至备用 $BACKUP_DNS"
-        uci del dhcp.lan.dns.server 2>/dev/null || true
-        uci add_list dhcp.lan.dns.server="$BACKUP_DNSV6"
+        uci del dhcp.lan.dns 2>/dev/null || true
+        uci add_list dhcp.lan.dns="$BACKUP_DNSV6"
         uci del dhcp.lan.dhcp_option 2>/dev/null || true
         uci add_list dhcp.lan.dhcp_option="6,$BACKUP_DNS"
         uci commit
