@@ -1,0 +1,910 @@
+#!/bin/bash
+
+# MSM 集成配置脚本
+# 功能：配置 MSM IP、备用 DNS、IPv4 路由、IPv6 路由
+
+# 颜色定义
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'  # No Color
+
+# 默认值
+DEFAULT_BACKUP_DNS="223.5.5.5"
+DEFAULT_BACKUP_DNSV6="2400:3200::1"
+DEFAULT_IPV4_GATEWAY="10.10.0.2"
+DEFAULT_IPV6_GATEWAY="fd00::ff:fe00:2"
+DEFAULT_INTERFACE="lan"
+HIGH_PRIORITY_NET="28.0.0.0/8"
+CHECK_HOST="https://8.8.8.8"
+DEFAULT_PUSHPLUS_TOKEN="238e26bd06f74371a6b61d3335c1e26f"
+USE_V6_DNS=0
+
+# IPv4 路由地址集 - 按分类定义
+read -r -d '' IPV4_FAKEIP_ROUTES << 'EOF' || true
+# MosDNS 和 Mihomo FakeIP 路由
+28.0.0.0/8
+8.8.8.8/32
+1.1.1.1/32
+EOF
+
+read -r -d '' IPV4_TELEGRAM_ROUTES << 'EOF' || true
+# Telegram 路由
+149.154.160.0/22
+149.154.164.0/22
+149.154.172.0/22
+91.108.4.0/22
+91.108.8.0/22
+91.108.12.0/22
+91.108.16.0/22
+91.108.20.0/22
+91.108.56.0/22
+95.161.64.0/22
+67.198.55.0/24
+109.239.140.0/24
+EOF
+
+read -r -d '' IPV4_NETFLIX_ROUTES << 'EOF' || true
+# Netflix 路由
+207.45.72.0/22
+208.75.76.0/22
+210.0.153.0/24
+185.76.151.0/24
+EOF
+
+# IPv6 路由地址集 - 按分类定义
+read -r -d '' IPV6_FAKEIP_ROUTES << 'EOF' || true
+# IPv6 FakeIP 路由
+f2b0::/18
+EOF
+
+read -r -d '' IPV6_TELEGRAM_ROUTES << 'EOF' || true
+# IPv6 Telegram 路由
+2001:b28:f23d::/48
+2001:b28:f23f::/48
+2001:67c:4e8::/48
+EOF
+
+is_msm_dns_healthy() {
+    ping -c1 -W1 "$IPV4_GATEWAY" >/dev/null 2>&1 || return 1
+    for d in baidu.com qq.com cloudflare.com; do
+        if nslookup -timeout=3 -retry=1 "$d" "$IPV4_GATEWAY" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
+# 根据选择合并路由
+merge_ipv4_routes() {
+    local temp_routes=""
+    [ "$SELECT_FAKEIP" = "1" ] && temp_routes="${temp_routes}${IPV4_FAKEIP_ROUTES}"$'\n'
+    [ "$SELECT_TELEGRAM" = "1" ] && temp_routes="${temp_routes}${IPV4_TELEGRAM_ROUTES}"$'\n'
+    [ "$SELECT_NETFLIX" = "1" ] && temp_routes="${temp_routes}${IPV4_NETFLIX_ROUTES}"$'\n'
+    IPV4_ROUTES="$temp_routes"
+}
+
+merge_ipv6_routes() {
+    local temp_routes=""
+    [ "$SELECT_IPV6_FAKEIP" = "1" ] && temp_routes="${temp_routes}${IPV6_FAKEIP_ROUTES}"$'\n'
+    [ "$SELECT_IPV6_TELEGRAM" = "1" ] && temp_routes="${temp_routes}${IPV6_TELEGRAM_ROUTES}"$'\n'
+    IPV6_ROUTES="$temp_routes"
+}
+
+# 打印分隔线
+print_separator() {
+    echo "============================================"
+}
+
+# 打印提示信息
+print_info() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+# 打印错误信息
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# 打印警告信息
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+# 清屏并显示菜单
+show_menu() {
+    clear
+    print_separator
+    echo "       MSM 集成配置工具"
+    print_separator
+    echo ""
+    echo "请选择要执行的操作："
+    echo ""
+    echo "1) 完整配置（DNS + IPv4路由 + IPv6路由）"
+    echo "2) 仅配置 DNS"
+    echo "3) 仅配置 IPv4 路由"
+    echo "4) 仅配置 IPv6 路由"
+    echo "5) 配置 DNS + IPv4 路由"
+    echo "6) 配置 DNS + IPv6 路由"
+    echo "7) 配置 IPv4 + IPv6 路由"
+    echo "8) 设置 DNS 健康检查定时计划"
+    echo "9) 取消 DNS 健康检查定时计划"
+    echo "0) 退出"
+    echo ""
+}
+
+# 选择 IPv4 路由分类
+select_ipv4_routes() {
+    clear
+    print_separator
+    echo "       选择 IPv4 路由分类"
+    print_separator
+    echo ""
+    echo "请选择要添加的 IPv4 路由分类（可多选）："
+    echo ""
+
+    # 初始化选择状态（默认全选）
+    SELECT_FAKEIP=1
+    SELECT_TELEGRAM=1
+    SELECT_NETFLIX=1
+
+    while true; do
+        echo "当前选择："
+        [ "$SELECT_FAKEIP" = "1" ] && echo "  ✓ MosDNS 和 Mihomo FakeIP" || echo "  ☐ MosDNS 和 Mihomo FakeIP"
+        [ "$SELECT_TELEGRAM" = "1" ] && echo "  ✓ Telegram" || echo "  ☐ Telegram"
+        [ "$SELECT_NETFLIX" = "1" ] && echo "  ✓ Netflix" || echo "  ☐ Netflix"
+        echo ""
+        echo "1) 切换 MosDNS 和 Mihomo FakeIP"
+        echo "2) 切换 Telegram"
+        echo "3) 切换 Netflix"
+        echo "4) 全选"
+        echo "5) 全不选"
+        echo "6) 确认并继续"
+        echo ""
+
+        read -p "请选择 (1-6): " choice
+
+        case $choice in
+            1) [ "$SELECT_FAKEIP" = "1" ] && SELECT_FAKEIP=0 || SELECT_FAKEIP=1 ;;
+            2) [ "$SELECT_TELEGRAM" = "1" ] && SELECT_TELEGRAM=0 || SELECT_TELEGRAM=1 ;;
+            3) [ "$SELECT_NETFLIX" = "1" ] && SELECT_NETFLIX=0 || SELECT_NETFLIX=1 ;;
+            4) SELECT_FAKEIP=1; SELECT_TELEGRAM=1; SELECT_NETFLIX=1 ;;
+            5) SELECT_FAKEIP=0; SELECT_TELEGRAM=0; SELECT_NETFLIX=0 ;;
+            6)
+                if [ "$SELECT_FAKEIP" = "0" ] && [ "$SELECT_TELEGRAM" = "0" ] && [ "$SELECT_NETFLIX" = "0" ]; then
+                    print_error "至少选择一个路由分类"
+                else
+                    break
+                fi
+                ;;
+            *) print_error "无效的选择" ;;
+        esac
+        clear
+        print_separator
+        echo "       选择 IPv4 路由分类"
+        print_separator
+        echo ""
+    done
+}
+
+# 选择 IPv6 路由分类
+select_ipv6_routes() {
+    clear
+    print_separator
+    echo "       选择 IPv6 路由分类"
+    print_separator
+    echo ""
+    echo "请选择要添加的 IPv6 路由分类（可多选）："
+    echo ""
+
+    # 初始化选择状态（默认全选）
+    SELECT_IPV6_FAKEIP=1
+    SELECT_IPV6_TELEGRAM=1
+
+    while true; do
+        echo "当前选择："
+        [ "$SELECT_IPV6_FAKEIP" = "1" ] && echo "  ✓ IPv6 FakeIP" || echo "  ☐ IPv6 FakeIP"
+        [ "$SELECT_IPV6_TELEGRAM" = "1" ] && echo "  ✓ IPv6 Telegram" || echo "  ☐ IPv6 Telegram"
+        echo ""
+        echo "1) 切换 IPv6 FakeIP"
+        echo "2) 切换 IPv6 Telegram"
+        echo "3) 全选"
+        echo "4) 全不选"
+        echo "5) 确认并继续"
+        echo ""
+
+        read -p "请选择 (1-5): " choice
+
+        case $choice in
+            1) [ "$SELECT_IPV6_FAKEIP" = "1" ] && SELECT_IPV6_FAKEIP=0 || SELECT_IPV6_FAKEIP=1 ;;
+            2) [ "$SELECT_IPV6_TELEGRAM" = "1" ] && SELECT_IPV6_TELEGRAM=0 || SELECT_IPV6_TELEGRAM=1 ;;
+            3) SELECT_IPV6_FAKEIP=1; SELECT_IPV6_TELEGRAM=1 ;;
+            4) SELECT_IPV6_FAKEIP=0; SELECT_IPV6_TELEGRAM=0 ;;
+            5)
+                if [ "$SELECT_IPV6_FAKEIP" = "0" ] && [ "$SELECT_IPV6_TELEGRAM" = "0" ]; then
+                    print_error "至少选择一个路由分类"
+                else
+                    break
+                fi
+                ;;
+            *) print_error "无效的选择" ;;
+        esac
+        clear
+        print_separator
+        echo "       选择 IPv6 路由分类"
+        print_separator
+        echo ""
+    done
+}
+
+# 手动输入 MSM IPv4 和 IPv6 地址
+get_msm_ips() {
+    echo ""
+    echo "请输入 MSM 的 IPv4 地址（默认: $DEFAULT_IPV4_GATEWAY）:"
+    read -r IPV4_GATEWAY
+    if [ -z "$IPV4_GATEWAY" ]; then
+        IPV4_GATEWAY="$DEFAULT_IPV4_GATEWAY"
+    fi
+    print_info "MSM IPv4 地址: $IPV4_GATEWAY"
+
+    # 立即检查 IPv4 连接
+    echo "正在测试 IPv4 连接..."
+    if ping -c 2 -W 2 "$IPV4_GATEWAY" > /dev/null 2>&1; then
+        print_info "IPv4 连接正常 - 可以访问 $IPV4_GATEWAY"
+    else
+        print_error "IPv4 连接失败 - 无法访问 $IPV4_GATEWAY"
+    fi
+
+    echo ""
+    read -p "是否配置 IPv6 地址? (y/n, 默认: y): " config_ipv6
+    if [ "$config_ipv6" = "n" ] || [ "$config_ipv6" = "N" ]; then
+        IPV6_GATEWAY=""
+        print_info "跳过 IPv6 地址配置"
+    else
+        echo ""
+        echo "请输入 MSM 的 IPv6 地址（默认: $DEFAULT_IPV6_GATEWAY）:"
+        read -r IPV6_GATEWAY
+        if [ -z "$IPV6_GATEWAY" ]; then
+            IPV6_GATEWAY="$DEFAULT_IPV6_GATEWAY"
+        fi
+        print_info "MSM IPv6 地址: $IPV6_GATEWAY"
+
+        # 立即检查 IPv6 连接
+        echo "正在测试 IPv6 连接..."
+        if ping -c 2 -W 2 "$IPV6_GATEWAY" > /dev/null 2>&1; then
+            print_info "IPv6 连接正常 - 可以访问 $IPV6_GATEWAY"
+        else
+            print_error "IPv6 连接失败 - 无法访问 $IPV6_GATEWAY"
+        fi
+    fi
+}
+
+# 获取备用 DNS
+get_backup_dns() {
+    echo ""
+    echo "请输入备用 DNS 地址（默认: $DEFAULT_BACKUP_DNS）:"
+    read -r BACKUP_DNS
+    if [ -z "$BACKUP_DNS" ]; then
+        BACKUP_DNS="$DEFAULT_BACKUP_DNS"
+    fi
+    print_info "使用备用 DNS: $BACKUP_DNS"
+
+    echo ""
+    echo "请输入备用 DNSV6 地址（默认: $DEFAULT_BACKUP_DNSV6）:"
+    read -r BACKUP_DNSV6
+    if [ -z "$BACKUP_DNSV6" ]; then
+        BACKUP_DNSV6="$DEFAULT_BACKUP_DNSV6"
+    fi
+    print_info "使用备用 DNSV6: $BACKUP_DNSV6"
+}
+
+get_pushplus_token() {
+    echo ""
+    echo "请输入 PushPlus token（默认: $DEFAULT_PUSHPLUS_TOKEN）:"
+    read -r PUSHPLUS_TOKEN
+    if [ -z "$PUSHPLUS_TOKEN" ]; then
+        PUSHPLUS_TOKEN="$DEFAULT_PUSHPLUS_TOKEN"
+    fi
+    print_info "使用 PushPlus token: $PUSHPLUS_TOKEN"
+}
+
+# 检查路由配置后是否能访问
+check_accessibility() {
+    local ipv4_ok=0
+    local ipv6_ok=0
+
+    print_separator
+    print_info "检查网络访问..."
+    print_separator
+    echo ""
+
+    # 检查 IPv4 连接
+    if [ -n "$IPV4_GATEWAY" ]; then
+        echo "正在测试 IPv4 连接..."
+        if ping -c 2 -W 2 "$IPV4_GATEWAY" > /dev/null 2>&1; then
+            print_info "IPv4 连接正常 - 可以访问 $IPV4_GATEWAY"
+            ipv4_ok=1
+        else
+            print_error "IPv4 连接失败 - 无法访问 $IPV4_GATEWAY"
+        fi
+    fi
+
+    # 检查 IPv6 连接
+    if [ -n "$IPV6_GATEWAY" ]; then
+        echo "正在测试 IPv6 连接..."
+        if ping -c 2 -W 2 "$IPV6_GATEWAY" > /dev/null 2>&1; then
+            print_info "IPv6 连接正常 - 可以访问 $IPV6_GATEWAY"
+            ipv6_ok=1
+        else
+            print_error "IPv6 连接失败 - 无法访问 $IPV6_GATEWAY"
+        fi
+    fi
+
+    echo ""
+
+    # 汇总结果
+    if [ $ipv4_ok -eq 1 ] || [ $ipv6_ok -eq 1 ]; then
+        print_info "网络连接测试部分成功"
+    else
+        print_warning "网络连接测试失败，请检查路由配置"
+    fi
+
+    echo ""
+}
+
+# 配置 DNS（MSM 健康检查）
+setup_dns() {
+    print_separator
+    print_info "【DNS 配置】"
+    print_separator
+
+    echo ""
+    echo "正在检查 MSM 连接状态..."
+
+    if is_msm_dns_healthy; then
+        print_info "网络连接正常，使用 MSM DNS"
+        CURRENT_DNS=$(uci get dhcp.lan.dhcp_option 2>/dev/null | grep "$IPV4_GATEWAY")
+        if [ -z "$CURRENT_DNS" ]; then
+            if [ "$USE_V6_DNS" = "1" ]; then
+                print_info "正在切换到 MSM DNS: $IPV4_GATEWAY，$IPV6_GATEWAY"
+                uci del dhcp.lan.dns 2>/dev/null || true
+                uci add_list dhcp.lan.dns="$IPV6_GATEWAY"
+            else
+                print_info "正在切换到 MSM DNS: $IPV4_GATEWAY"
+            fi
+
+            uci del dhcp.lan.dhcp_option 2>/dev/null || true
+            uci add_list dhcp.lan.dhcp_option="6,$IPV4_GATEWAY"
+
+            uci commit
+            /etc/init.d/network reload
+            /etc/init.d/dnsmasq restart
+            print_info "DNS 配置完成"
+            if [ "$USE_V6_DNS" = "1" ]; then
+                logger -t "MSM-CONFIG" "MSM 恢复，已切换到 MSM DNS $IPV4_GATEWAY，$IPV6_GATEWAY"
+            else
+                logger -t "MSM-CONFIG" "MSM 恢复，已切换到 MSM DNS $IPV4_GATEWAY"
+            fi
+        else
+            print_info "MSM DNS 已配置，无需更改"
+        fi
+    else
+        print_warning "网络连接异常，使用备用 DNS"
+        CURRENT_DNS=$(uci get dhcp.lan.dhcp_option 2>/dev/null | grep "$BACKUP_DNS")
+        if [ -z "$CURRENT_DNS" ]; then
+            if [ "$USE_V6_DNS" = "1" ]; then
+                print_info "正在切换到备用 DNS: $BACKUP_DNS，$BACKUP_DNSV6"
+                uci del dhcp.lan.dns 2>/dev/null || true
+                uci add_list dhcp.lan.dns="$BACKUP_DNSV6"
+            else
+                print_info "正在切换到备用 DNS: $BACKUP_DNS"
+            fi
+
+
+            uci del dhcp.lan.dhcp_option 2>/dev/null || true
+            uci add_list dhcp.lan.dhcp_option="6,$BACKUP_DNS"
+
+            uci commit
+            /etc/init.d/network reload
+            /etc/init.d/dnsmasq restart
+            print_info "DNS 配置完成"
+            logger -t "MSM-CONFIG" "MSM 故障，已切换到备用 DNS $BACKUP_DNS"
+        else
+            print_info "备用 DNS 已配置，无需更改"
+        fi
+    fi
+}
+
+# 配置 IPv4 路由
+setup_ipv4_routes() {
+    print_separator
+    print_info "【IPv4 路由配置】"
+    print_separator
+
+    select_ipv4_routes
+    merge_ipv4_routes
+
+    echo ""
+    print_info "正在添加新 IPv4 路由..."
+    echo ""
+    ROUTE_COUNT=0
+    while IFS= read -r line; do
+        # 跳过空行和注释
+        if [ -z "$line" ] || [[ "$line" =~ ^# ]]; then
+            continue
+        fi
+
+        target_net="$line"
+
+        # 删除目标相同的原始规则
+        EXISTING_ROUTES=$(uci show network 2>/dev/null | grep "=route" | grep -v "=route6" | cut -d'.' -f2 | cut -d'=' -f1 | sort -u)
+        for route in $EXISTING_ROUTES; do
+            ROUTE_TARGET=$(uci get network."$route".target 2>/dev/null)
+            if [ "$ROUTE_TARGET" = "$target_net" ]; then
+                print_info "删除目标重复的旧路由: $route ($target_net)"
+                uci del network."$route" || true
+            fi
+        done
+
+        # 添加路由
+        ROUTE_SECTION=$(uci add network route)
+        uci set network."$ROUTE_SECTION".interface="$DEFAULT_INTERFACE"
+        uci set network."$ROUTE_SECTION".target="$target_net"
+        uci set network."$ROUTE_SECTION".gateway="$IPV4_GATEWAY"
+
+        # 为 FakeIP 网段设置高优先级
+        if [ "$target_net" = "$HIGH_PRIORITY_NET" ]; then
+            uci set network."$ROUTE_SECTION".metric="0"
+            print_info "添加高优先级路由: $target_net"
+        else
+            uci set network."$ROUTE_SECTION".metric="1"
+            print_info "添加路由: $target_net"
+        fi
+
+        ROUTE_COUNT=$((ROUTE_COUNT + 1))
+    done <<< "$IPV4_ROUTES"
+
+    if [ $ROUTE_COUNT -gt 0 ]; then
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        print_info "已添加 $ROUTE_COUNT 条路由，正在提交配置..."
+
+        uci commit network
+        if [ $? -eq 0 ]; then
+            print_info "配置已提交"
+        else
+            print_error "提交配置失败"
+            return 1
+        fi
+
+        print_info "正在重启网络服务..."
+        /etc/init.d/network reload
+        if [ $? -eq 0 ]; then
+            print_info "网络服务已重启"
+        else
+            print_error "重启网络服务失败"
+        fi
+
+        echo ""
+        print_info "✅ IPv4 路由配置完成！已添加 $ROUTE_COUNT 条路由"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    else
+        echo ""
+        print_warning "⚠️  未添加任何 IPv4 路由"
+        return 1
+    fi
+}
+
+# 设置健康检查定时计划
+setup_health_check_schedule() {
+    print_separator
+    print_info "【DNS 健康检查设置】"
+    print_separator
+
+    # 健康检查脚本路径
+    HEALTH_CHECK_SCRIPT="/usr/local/bin/msm-health-check.sh"
+
+    echo ""
+    # 检查目录是否存在，不存在则创建
+    if [ ! -d "/usr/local/bin" ]; then
+        print_info "创建目录 /usr/local/bin"
+        mkdir -p /usr/local/bin
+    fi
+
+    print_info "正在创建健康检查脚本..."
+    get_pushplus_token
+
+    # 创建健康检查脚本
+    if [ "$USE_V6_DNS" = "1" ]; then
+        cat > "$HEALTH_CHECK_SCRIPT" << 'HEALTH_EOF'
+#!/bin/bash
+
+# MSM Docker 健康检查脚本（集成PushPlus推送）
+# 检查 msm 容器是否正常运行，如果容器停止则切换到备用 DNS，切换后等待 5 分钟再检查
+
+MSM_IP="PLACEHOLDER_MSM_IP"
+MSM_IPV6="PLACEHOLDER_MSM_IPV6"
+BACKUP_DNS="PLACEHOLDER_BACKUP_DNS"
+BACKUP_DNSV6="PLACEHOLDER_BACKUP_DNSV6"
+PUSHPLUS_TOKEN="PLACEHOLDER_PUSHPLUS_TOKEN"
+
+
+
+# 状态文件，用于记录最后一次切换到备用 DNS 的时间戳
+STATE_FILE="/tmp/msm_dns_switch_time"
+WAIT_TIME=900  # 15分钟 = 900秒
+
+is_msm_dns_healthy() {
+    ping -c1 -W1 "$MSM_IP" >/dev/null 2>&1 || return 1
+    for d in baidu.com qq.com cloudflare.com; do
+        if nslookup -timeout=3 -retry=1 "$d" "$MSM_IP" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# PushPlus 推送函数（异步，不阻塞）
+push_to_pushplus() {
+    local token="$PUSHPLUS_TOKEN"
+    local title="$1"
+    local content="$2"
+    local url="http://www.pushplus.plus/send"
+    local json="{\"token\":\"$token\", \"title\":\"$title\", \"content\":\"$content\"}"
+
+    # 后台执行 curl，忽略所有输出，并使用 disown 防止脚本退出时中断请求
+    curl -H "Content-Type: application/json" -X POST -d "$json" $url > /dev/null 2>&1 & disown
+}
+
+# 如果存在状态文件，读取上次切换时间戳
+if [ -f "$STATE_FILE" ]; then
+    last_switch=$(cat "$STATE_FILE")
+    current_time=$(date +%s)
+    elapsed=$((current_time - last_switch))
+
+    # 如果距离上次切换不足 15 分钟，则直接退出，跳过本次检测
+    if [ $elapsed -lt $WAIT_TIME ]; then
+        logger -t "MSM-HEALTH-CHECK" "距离上次切换到备用 DNS 不足 5 分钟（已过 ${elapsed}秒），本次跳过检测"
+        exit 0
+    fi
+fi
+if is_msm_dns_healthy; then
+    CURRENT_DNS="$(uci get dhcp.lan.dhcp_option 2>/dev/null || true)"
+    echo "$CURRENT_DNS" | grep -q "6,$MSM_IP"
+    if [ $? -ne 0 ]; then
+        push_to_pushplus "MSM 恢复" "检测到 MSM DNS 正常，DNS 已切换回 $MSM_IP"
+        uci del dhcp.lan.dns 2>/dev/null || true
+        uci add_list dhcp.lan.dns="$MSM_IPV6"
+        uci del dhcp.lan.dhcp_option 2>/dev/null || true
+        uci add_list dhcp.lan.dhcp_option="6,$MSM_IP"
+        uci commit
+        /etc/init.d/network reload
+        /etc/init.d/dnsmasq restart
+        rm -f "$STATE_FILE"
+    fi
+else
+    CURRENT_DNS="$(uci get dhcp.lan.dhcp_option 2>/dev/null || true)"
+    echo "$CURRENT_DNS" | grep -q "$BACKUP_DNS"
+    if [ $? -ne 0 ]; then
+        push_to_pushplus "MSM 故障" "检测到 MSM DNS 异常，DNS 已切换至备用 $BACKUP_DNS"
+        uci del dhcp.lan.dns 2>/dev/null || true
+        uci add_list dhcp.lan.dns="$BACKUP_DNSV6"
+        uci del dhcp.lan.dhcp_option 2>/dev/null || true
+        uci add_list dhcp.lan.dhcp_option="6,$BACKUP_DNS"
+        uci commit
+        /etc/init.d/network reload
+        /etc/init.d/dnsmasq restart
+        date +%s > "$STATE_FILE"
+    fi
+fi
+
+HEALTH_EOF
+        sed -i "s|PLACEHOLDER_MSM_IPV6|$IPV6_GATEWAY|g" "$HEALTH_CHECK_SCRIPT"
+        sed -i "s|PLACEHOLDER_MSM_IP|$IPV4_GATEWAY|g" "$HEALTH_CHECK_SCRIPT"
+        sed -i "s|PLACEHOLDER_BACKUP_DNSV6|$BACKUP_DNSV6|g" "$HEALTH_CHECK_SCRIPT"
+        sed -i "s|PLACEHOLDER_BACKUP_DNS|$BACKUP_DNS|g" "$HEALTH_CHECK_SCRIPT"
+        sed -i "s|PLACEHOLDER_PUSHPLUS_TOKEN|$PUSHPLUS_TOKEN|g" "$HEALTH_CHECK_SCRIPT"
+    else
+        cat > "$HEALTH_CHECK_SCRIPT" << 'HEALTH_EOF'
+#!/bin/bash
+
+# MSM Docker 健康检查脚本（集成PushPlus推送）
+# 检查 msm 容器是否正常运行，如果容器停止则切换到备用 DNS，切换后等待 5 分钟再检查
+
+MSM_IP="PLACEHOLDER_MSM_IP"
+BACKUP_DNS="PLACEHOLDER_BACKUP_DNS"
+PUSHPLUS_TOKEN="PLACEHOLDER_PUSHPLUS_TOKEN"
+
+
+
+# 状态文件，用于记录最后一次切换到备用 DNS 的时间戳
+STATE_FILE="/tmp/msm_dns_switch_time"
+WAIT_TIME=900  # 15分钟 = 900秒
+
+is_msm_dns_healthy() {
+    ping -c1 -W1 "$MSM_IP" >/dev/null 2>&1 || return 1
+    for d in baidu.com qq.com cloudflare.com; do
+        if nslookup -timeout=3 -retry=1 "$d" "$MSM_IP" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# PushPlus 推送函数（异步，不阻塞）
+push_to_pushplus() {
+    local token="$PUSHPLUS_TOKEN"
+    local title="$1"
+    local content="$2"
+    local url="http://www.pushplus.plus/send"
+    local json="{\"token\":\"$token\", \"title\":\"$title\", \"content\":\"$content\"}"
+
+    # 后台执行 curl，忽略所有输出，并使用 disown 防止脚本退出时中断请求
+    curl -H "Content-Type: application/json" -X POST -d "$json" $url > /dev/null 2>&1 & disown
+}
+
+# 如果存在状态文件，读取上次切换时间戳
+if [ -f "$STATE_FILE" ]; then
+    last_switch=$(cat "$STATE_FILE")
+    current_time=$(date +%s)
+    elapsed=$((current_time - last_switch))
+
+    # 如果距离上次切换不足 15 分钟，则直接退出，跳过本次检测
+    if [ $elapsed -lt $WAIT_TIME ]; then
+        logger -t "MSM-HEALTH-CHECK" "距离上次切换到备用 DNS 不足 5 分钟（已过 ${elapsed}秒），本次跳过检测"
+        exit 0
+    fi
+fi
+if is_msm_dns_healthy; then
+    CURRENT_DNS="$(uci get dhcp.lan.dhcp_option 2>/dev/null || true)"
+    echo "$CURRENT_DNS" | grep -q "6,$MSM_IP"
+    if [ $? -ne 0 ]; then
+        push_to_pushplus "MSM 恢复" "检测到 MSM DNS 正常，DNS 已切换回 $MSM_IP"
+
+        uci del dhcp.lan.dhcp_option 2>/dev/null || true
+        uci add_list dhcp.lan.dhcp_option="6,$MSM_IP"
+        uci commit
+        /etc/init.d/network reload
+        /etc/init.d/dnsmasq restart
+        rm -f "$STATE_FILE"
+    fi
+else
+    CURRENT_DNS="$(uci get dhcp.lan.dhcp_option 2>/dev/null || true)"
+    echo "$CURRENT_DNS" | grep -q "$BACKUP_DNS"
+    if [ $? -ne 0 ]; then
+        push_to_pushplus "MSM 故障" "检测到 MSM DNS 异常，DNS 已切换至备用 $BACKUP_DNS"
+
+        uci del dhcp.lan.dhcp_option 2>/dev/null || true
+        uci add_list dhcp.lan.dhcp_option="6,$BACKUP_DNS"
+        uci commit
+        /etc/init.d/network reload
+        /etc/init.d/dnsmasq restart
+        date +%s > "$STATE_FILE"
+    fi
+fi
+
+HEALTH_EOF
+        sed -i "s|PLACEHOLDER_MSM_IP|$IPV4_GATEWAY|g" "$HEALTH_CHECK_SCRIPT"
+        sed -i "s|PLACEHOLDER_BACKUP_DNS|$BACKUP_DNS|g" "$HEALTH_CHECK_SCRIPT"
+        sed -i "s|PLACEHOLDER_PUSHPLUS_TOKEN|$PUSHPLUS_TOKEN|g" "$HEALTH_CHECK_SCRIPT"
+    fi
+
+    chmod +x "$HEALTH_CHECK_SCRIPT"
+    print_info "脚本已创建: $HEALTH_CHECK_SCRIPT"
+
+    echo ""
+    print_info "正在配置定时任务..."
+
+    # 移除可能存在的旧 crontab 条目
+    crontab -l 2>/dev/null | grep -v "msm-health-check.sh" | crontab - 2>/dev/null || true
+
+    # 添加新的 crontab 条目 - 每分钟执行一次
+    (crontab -l 2>/dev/null; echo "*/5 * * * * $HEALTH_CHECK_SCRIPT") | crontab - 2>/dev/null
+
+    echo ""
+    print_info "✅ DNS 健康检查已启用！"
+    print_info "  - 执行频率: 每分钟检查一次"
+    print_info "  - 脚本位置: $HEALTH_CHECK_SCRIPT"
+
+    logger -t "MSM-CONFIG" "DNS 健康检查定时计划已启用，MSM IP: $IPV4_GATEWAY, 备用 DNS: $BACKUP_DNS"
+}
+
+# 取消健康检查定时计划
+cancel_health_check_schedule() {
+    print_separator
+    print_info "【DNS 健康检查取消】"
+    print_separator
+
+    echo ""
+    print_info "正在移除定时任务..."
+
+    # 移除 crontab 条目
+    crontab -l 2>/dev/null | grep -v "msm-health-check.sh" | crontab - 2>/dev/null || true
+
+    print_info "✅ DNS 健康检查已取消！"
+
+    echo ""
+    read -p "是否删除健康检查脚本? (y/n, 默认: n): " confirm
+    if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+        rm -f /usr/local/bin/msm-health-check.sh
+        print_info "脚本已删除"
+    fi
+
+    logger -t "MSM-CONFIG" "DNS 健康检查定时计划已取消"
+}
+
+# 配置 IPv6 路由
+setup_ipv6_routes() {
+    print_separator
+    print_info "【IPv6 路由配置】"
+    print_separator
+
+    select_ipv6_routes
+    merge_ipv6_routes
+
+    echo ""
+    print_info "正在添加新 IPv6 路由..."
+    echo ""
+    ROUTE_COUNT=0
+    while IFS= read -r line; do
+        # 跳过空行和注释
+        if [ -z "$line" ] || [[ "$line" =~ ^# ]]; then
+            continue
+        fi
+
+        target_net="$line"
+
+        # 删除目标相同的原始规则
+        EXISTING_ROUTES=$(uci show network 2>/dev/null | grep "=route6" | cut -d'.' -f2 | cut -d'=' -f1 | sort -u)
+        for route in $EXISTING_ROUTES; do
+            ROUTE_TARGET=$(uci get network."$route".target 2>/dev/null)
+            if [ "$ROUTE_TARGET" = "$target_net" ]; then
+                print_info "删除目标重复的旧路由: $route ($target_net)"
+                uci delete network."$route" || true
+            fi
+        done
+
+        ROUTE_SECTION=$(uci add network route6)
+        uci set network."$ROUTE_SECTION".interface="$DEFAULT_INTERFACE"
+        uci set network."$ROUTE_SECTION".target="$target_net"
+        uci set network."$ROUTE_SECTION".gateway="$IPV6_GATEWAY"
+
+        print_info "添加 IPv6 路由: $target_net"
+        ROUTE_COUNT=$((ROUTE_COUNT + 1))
+    done <<< "$IPV6_ROUTES"
+
+    if [ $ROUTE_COUNT -gt 0 ]; then
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        print_info "已添加 $ROUTE_COUNT 条路由，正在提交配置..."
+
+        uci commit network
+        if [ $? -eq 0 ]; then
+            print_info "配置已提交"
+        else
+            print_error "提交配置失败"
+            return 1
+        fi
+
+        print_info "正在重启网络服务..."
+        /etc/init.d/network reload
+        if [ $? -eq 0 ]; then
+            print_info "网络服务已重启"
+        else
+            print_error "重启网络服务失败"
+        fi
+
+        echo ""
+        print_info "✅ IPv6 路由配置完成！已添加 $ROUTE_COUNT 条路由"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    else
+        echo ""
+        print_warning "⚠️  未添加任何 IPv6 路由"
+        return 1
+    fi
+}
+
+# 主程序
+main() {
+    echo ""
+    print_separator
+    echo "       🚀 MSM 集成配置工具"
+    print_separator
+
+    echo ""
+    read -p "是否已经关闭 IPv6 的 DNS 下发? (Y/n，默认: Y): " is_ipv6_dns_disabled
+    case "$is_ipv6_dns_disabled" in
+        n|N)
+            USE_V6_DNS=1
+            print_info "将使用 IPv4+IPv6 DNS 下发模式（setup-msm 逻辑）"
+            ;;
+        *)
+            USE_V6_DNS=0
+            print_info "将使用仅 IPv4 DNS 下发模式（setup-msm-nov6DNS 逻辑）"
+            ;;
+    esac
+
+    # 初始化时只获取一次 MSM 地址和备用 DNS
+    get_msm_ips
+    get_backup_dns
+
+    echo ""
+    print_separator
+    print_info "配置信息确认"
+    print_separator
+    print_info "MSM IPv4 地址: $IPV4_GATEWAY"
+    if [ -n "$IPV6_GATEWAY" ]; then
+        print_info "MSM IPv6 地址: $IPV6_GATEWAY"
+    fi
+    print_info "备用 DNS 地址: $BACKUP_DNS"
+    if [ -n "$BACKUP_DNSV6" ]; then
+        print_info "备用 DNS IPv6 地址: $BACKUP_DNSV6"
+    fi
+    if [ "$USE_V6_DNS" = "1" ]; then
+        print_info "DNS 模式: IPv4 + IPv6 DNS 下发"
+    else
+        print_info "DNS 模式: 仅 IPv4 DNS 下发"
+    fi
+    echo ""
+    read -p "按 Enter 进入菜单..."
+
+    while true; do
+        show_menu
+        read -p "请选择 (0-9): " choice
+
+        case $choice in
+            1)
+                setup_dns
+                setup_ipv4_routes
+                setup_ipv6_routes
+                ;;
+            2)
+                setup_dns || true
+                ;;
+            3)
+                setup_ipv4_routes || true
+                ;;
+            4)
+                setup_ipv6_routes || true
+                ;;
+            5)
+                setup_dns || true
+                setup_ipv4_routes || true
+                ;;
+            6)
+                setup_dns || true
+                setup_ipv6_routes || true
+                ;;
+            7)
+                setup_ipv4_routes || true
+                setup_ipv6_routes || true
+                ;;
+            8)
+                setup_health_check_schedule || true
+                ;;
+            9)
+                cancel_health_check_schedule || true
+                ;;
+            0)
+                print_info "感谢使用 MSM 配置工具，再见！"
+                exit 0
+                ;;
+            *)
+                print_error "无效的选择，请重试"
+                read -p "按 Enter 继续..."
+                ;;
+        esac
+
+        echo ""
+        print_separator
+        read -p "按 Enter 继续..."
+    done
+}
+
+# 检查是否为 root 用户
+if [ "$EUID" -ne 0 ]; then
+    print_error "此脚本需要 root 权限运行"
+    exit 1
+fi
+
+# 运行主程序
+main
